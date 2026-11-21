@@ -175,7 +175,7 @@ impl Store {
     }
 
     /// `(dedupe_key, last_seen_at)` of every stored finding of `rule_id`
-    /// detected at or before `up_to`, for the tenant. Rows with unparseable
+    /// detected and last seen at or before `up_to`, for the tenant. Rows with unparseable
     /// timestamps are skipped with a warning. Note: `evaluate --as-of <future>`
     /// without `--dry-run` writes future-dated findings that this filter hides
     /// from later runs (fails safe: a duplicate alert).
@@ -206,7 +206,7 @@ impl Store {
                 tracing::warn!(rule_id, dedupe_key = %key, "skipping finding with unparseable timestamps");
                 continue;
             };
-            if detected <= up_to {
+            if detected <= up_to && last_seen <= up_to {
                 keys.push((key, last_seen));
             }
         }

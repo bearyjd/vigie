@@ -514,3 +514,46 @@ async fn corrupt_finding_row_does_not_fail_evaluation() {
         .expect("evaluation survives a corrupt row");
     assert!(findings.iter().any(|f| f.rule_id == "balance-floor"));
 }
+
+#[tokio::test]
+async fn raised_floor_yields_one_new_key_not_one_per_day() {
+    use veille::rules::evaluate_tenant;
+    let (_d, store, tenant) = store_with_tenant().await;
+    let at = |t: i64| now() + Duration::days(t);
+    let mut keys_at_raise = 0;
+    for t in 0..=230 {
+        // 600 for days 0-99, then 400; floor 500 until day 131, then 1000.
+        let balance = if t < 100 { 600 } else { 400 };
+        store
+            .insert_account_snapshots(tenant, &[account(balance)], at(t))
+            .await
+            .unwrap();
+        store.prune(tenant, at(t), &cfg(14, 90)).await.unwrap();
+        let floor = if t < 131 { 500 } else { 1000 };
+        let thresholds = veille::config::RuleThresholds {
+            balance_floor_minor: Some(floor),
+            ..Default::default()
+        };
+        if t >= 100 {
+            evaluate_tenant(&store, tenant, thresholds, at(t), true)
+                .await
+                .unwrap();
+        }
+        if t == 130 {
+            keys_at_raise = store
+                .finding_dedupe_keys(tenant, "balance-floor", at(t))
+                .await
+                .unwrap()
+                .len();
+        }
+    }
+    let keys = store
+        .finding_dedupe_keys(tenant, "balance-floor", at(231))
+        .await
+        .unwrap();
+    assert_eq!(keys_at_raise, 1);
+    assert!(
+        keys.len() <= keys_at_raise + 1,
+        "raised floor must add at most one key, got {keys:?}"
+    );
+}

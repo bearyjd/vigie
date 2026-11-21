@@ -59,8 +59,8 @@ pub struct EvalContext {
     /// Latest `balance-floor` episode start already recorded per account,
     /// read back from persisted finding keys. `balance_floor` uses it so its
     /// dedupe key does not drift when pruning shortens the balance series.
-    /// Value: (episode start, date the episode was last seen).
-    pub balance_floor_episodes: BTreeMap<String, (chrono::NaiveDate, chrono::NaiveDate)>,
+    /// Every stored episode per account: (episode start, date last seen).
+    pub balance_floor_episodes: BTreeMap<String, Vec<(chrono::NaiveDate, chrono::NaiveDate)>>,
 }
 
 pub trait Rule: Send + Sync {
@@ -160,14 +160,14 @@ pub async fn evaluate_tenant(
     Ok(findings)
 }
 
-/// Latest episode start per account from stored `balance-floor` keys
+/// All episodes per account from stored `balance-floor` keys
 /// (`balance-floor:{account}:{YYYY-MM-DD}`; account ids may contain colons).
 async fn balance_floor_episodes(
     store: &Store,
     tenant: TenantId,
     now: DateTime<Utc>,
-) -> Result<BTreeMap<String, (chrono::NaiveDate, chrono::NaiveDate)>, EngineError> {
-    let mut episodes = BTreeMap::new();
+) -> Result<BTreeMap<String, Vec<(chrono::NaiveDate, chrono::NaiveDate)>>, EngineError> {
+    let mut episodes: BTreeMap<String, Vec<_>> = BTreeMap::new();
     // Only findings that existed at `now`: --as-of replays must not see later ones.
     for (key, last_seen) in store
         .finding_dedupe_keys(tenant, "balance-floor", now)
@@ -179,8 +179,10 @@ async fn balance_floor_episodes(
             .and_then(|(account, date)| Some((account, date.parse::<chrono::NaiveDate>().ok()?)));
         if let Some((account, date)) = parsed {
             let seen = last_seen.date_naive();
-            let entry = episodes.entry(account.to_string()).or_insert((date, seen));
-            *entry = (*entry).max((date, seen));
+            episodes
+                .entry(account.to_string())
+                .or_default()
+                .push((date, seen));
         }
     }
     Ok(episodes)

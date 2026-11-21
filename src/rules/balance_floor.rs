@@ -85,13 +85,21 @@ impl Rule for BalanceFloor {
             let episode_start = if run_len == series.len() {
                 ctx.balance_floor_episodes
                     .get(account_id)
+                    .into_iter()
+                    .flatten()
                     .filter(|(start, last_seen)| {
                         // Proof the old episode lasted until now: the latest
-                        // run saw it (UTC days, SLACK_DAYS for a missed run).
+                        // run saw it. Comparing UTC dates makes the effective
+                        // slack 48-72h. Newest start wins; any key whose start
+                        // is at or before the oldest visible point stays
+                        // eligible as that point moves forward, so it is
+                        // reused on every later run.
                         *start <= observed_start
                             && *last_seen + Duration::days(SLACK_DAYS) >= ctx.now.date_naive()
                     })
-                    .map_or(observed_start, |(start, _)| *start)
+                    .map(|(start, _)| *start)
+                    .max()
+                    .unwrap_or(observed_start)
             } else {
                 observed_start
             };
@@ -158,14 +166,14 @@ mod tests {
         // now = 2026-08-18. Seen 2 days ago: still ongoing, key reused.
         let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-01-01"), d("2026-08-16")));
+            .insert("a1".into(), vec![(d("2026-01-01"), d("2026-08-16"))]);
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-01-01"
         );
         // Seen 3 days ago: the episode did not last until now, new key.
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-01-01"), d("2026-08-15")));
+            .insert("a1".into(), vec![(d("2026-01-01"), d("2026-08-15"))]);
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-08-16"
@@ -178,14 +186,14 @@ mod tests {
         // (older than the oldest visible point) wins over the moving edge.
         let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-05-01"), d("2026-08-17")));
+            .insert("a1".into(), vec![(d("2026-05-01"), d("2026-08-17"))]);
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-05-01"
         );
         // A recorded start newer than the oldest point is a different run.
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-08-17"), d("2026-08-17")));
+            .insert("a1".into(), vec![(d("2026-08-17"), d("2026-08-17"))]);
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-08-16"
@@ -203,7 +211,7 @@ mod tests {
             ],
         );
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-08-01"), d("2026-08-17")));
+            .insert("a1".into(), vec![(d("2026-08-01"), d("2026-08-17"))]);
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-08-17"
