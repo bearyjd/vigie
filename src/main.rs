@@ -138,7 +138,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-const DEFAULT_DIGEST_PERIOD_DAYS: u32 = 7;
+const DEFAULT_DIGEST_PERIOD_DAYS: u32 = veille::config::DEFAULT_DIGEST_PERIOD_DAYS;
 
 struct LlmNarrator {
     client: reqwest::Client,
@@ -259,6 +259,7 @@ async fn run_command(
                 full,
             },
             narrator: narrator.as_ref().map(|n| n as &dyn veille::run::Narrator),
+            retention: config.retention,
         };
 
         match veille::run::run_tenant_once(
@@ -407,6 +408,13 @@ async fn prune_command(
     as_of: Option<String>,
 ) -> Result<(), String> {
     let now = parse_as_of(as_of)?;
+    // A future --as-of would age every row out early; allow only clock skew.
+    if now > chrono::Utc::now() + chrono::Duration::minutes(5) {
+        return Err(format!(
+            "--as-of {} is in the future; pruning as of a later instant would delete data early",
+            now.to_rfc3339()
+        ));
+    }
     if !config.store_path.exists() {
         return Err(format!(
             "store {} does not exist — nothing to prune",

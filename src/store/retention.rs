@@ -106,10 +106,11 @@ ON CONFLICT (tenant_id, account_external_id, symbol, day) DO UPDATE SET
   last_as_of = MAX(last_as_of, excluded.last_as_of),
   sample_count = sample_count + excluded.sample_count";
 
-fn day_cutoff(now: DateTime<Utc>, days: u32) -> String {
-    (now.date_naive() - Duration::days(i64::from(days)))
-        .format("%Y-%m-%d")
-        .to_string()
+fn day_cutoff(now: DateTime<Utc>, days: u32) -> Result<String> {
+    now.date_naive()
+        .checked_sub_signed(Duration::days(i64::from(days)))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .ok_or_else(|| StoreError::InvalidRetention(format!("{days} days is out of range")))
 }
 
 fn parse_day(raw: &str, column: &'static str) -> Result<NaiveDate> {
@@ -129,8 +130,8 @@ impl Store {
         now: DateTime<Utc>,
         retention: &RetentionConfig,
     ) -> Result<PruneStats> {
-        let raw_cutoff = day_cutoff(now, retention.raw_days);
-        let agg_cutoff = day_cutoff(now, retention.aggregate_days);
+        let raw_cutoff = day_cutoff(now, retention.raw_days)?;
+        let agg_cutoff = day_cutoff(now, retention.aggregate_days)?;
         let mut tx = self.pool().begin().await?;
 
         sqlx::query(AGGREGATE_ACCOUNTS)

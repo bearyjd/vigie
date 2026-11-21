@@ -35,6 +35,7 @@ fn digest_input() -> DigestInput {
         }],
         deltas: Vec::new(),
         narration: None,
+        coverage_note: None,
     }
 }
 

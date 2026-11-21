@@ -63,13 +63,28 @@ impl Rule for BalanceFloor {
             // continuing breach stays one episode; recovery followed by a later
             // re-breach is a new one (same pattern as sync-stale's last-success
             // discriminator — v1 has no clearing path, so the key must carry it).
-            let episode_start = series
+            //
+            // The series is bounded by retention (aggregate_days). When the run
+            // reaches the oldest point we cannot see its true start, and the
+            // oldest point moves forward with every prune; fall back to the
+            // episode start already recorded in the finding key so the key
+            // stays stable. (A recorded start newer than the oldest point
+            // belongs to a different run and is ignored.)
+            let run_len = series
                 .iter()
                 .rev()
                 .take_while(|p| p.balance_minor < floor)
-                .last()
-                .map(|p| p.date)
-                .unwrap_or(latest.date);
+                .count();
+            let observed_start = series[series.len() - run_len].date;
+            let episode_start = if run_len == series.len() {
+                ctx.balance_floor_episodes
+                    .get(account_id)
+                    .copied()
+                    .filter(|recorded| *recorded <= observed_start)
+                    .unwrap_or(observed_start)
+            } else {
+                observed_start
+            };
             findings.push(Finding {
                 rule_id: self.id().to_string(),
                 severity: Severity::Alert,
@@ -122,6 +137,44 @@ mod tests {
         ctx.account_kinds
             .insert(account.to_string(), "depository".to_string());
         ctx
+    }
+
+    #[test]
+    fn episode_key_is_stable_when_the_series_is_truncated() {
+        // Whole visible series is below the floor: the recorded episode start
+        // (older than the oldest visible point) wins over the moving edge.
+        let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
+        ctx.balance_floor_episodes
+            .insert("a1".into(), "2026-05-01".parse().unwrap());
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-05-01"
+        );
+        // A recorded start newer than the oldest point is a different run.
+        ctx.balance_floor_episodes
+            .insert("a1".into(), "2026-08-17".parse().unwrap());
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-16"
+        );
+    }
+
+    #[test]
+    fn recorded_episode_is_ignored_after_a_visible_recovery() {
+        let mut ctx = ctx_with_series(
+            "a1",
+            &[
+                ("2026-08-15", 30_000),
+                ("2026-08-16", 90_000),
+                ("2026-08-17", 30_000),
+            ],
+        );
+        ctx.balance_floor_episodes
+            .insert("a1".into(), "2026-08-01".parse().unwrap());
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-17"
+        );
     }
 
     #[test]

@@ -255,3 +255,17 @@ fn prune_only_runs_via_the_subcommand_and_reports_counts() {
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("raw_days"));
 }
+
+#[test]
+fn prune_rejects_a_future_as_of() {
+    let dir = TempDir::new().expect("tempdir");
+    let store_path = dir.path().join("s.sqlite3");
+    let config = write_config(&dir, &store_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_veille"))
+        .args(["prune", "--as-of", "2999-01-01T00:00:00Z", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run veille");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("in the future"));
+}

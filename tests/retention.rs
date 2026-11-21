@@ -315,3 +315,66 @@ fn retention_must_cover_the_longest_rule_window() {
         .to_string();
     assert!(msg.contains("120"), "{msg}");
 }
+
+#[tokio::test]
+async fn balance_floor_key_is_stable_after_pruning_a_long_breach() {
+    use veille::rules::evaluate_tenant;
+    let (_d, store, tenant) = store_with_tenant().await;
+    // 120 days continuously below the floor: longer than the 90d aggregates.
+    seed(&store, tenant, 120).await;
+    let thresholds = veille::config::RuleThresholds {
+        balance_floor_minor: Some(50_000),
+        ..Default::default()
+    };
+
+    let first = evaluate_tenant(&store, tenant, thresholds.clone(), now(), true)
+        .await
+        .unwrap();
+    let key = |fs: &[veille::domain::Finding]| {
+        fs.iter()
+            .find(|f| f.rule_id == "balance-floor")
+            .map(|f| f.dedupe_key.clone())
+            .expect("balance-floor finding")
+    };
+    let original = key(&first);
+    let findings_before = store.finding_count(tenant).await.unwrap();
+
+    // Prune daily for a few days; the visible series start moves forward.
+    for d in 1..=3 {
+        let later = now() + Duration::days(d);
+        store
+            .insert_account_snapshots(tenant, &[account(1500)], later)
+            .await
+            .unwrap();
+        store.prune(tenant, later, &cfg(14, 90)).await.unwrap();
+        let fs = evaluate_tenant(&store, tenant, thresholds.clone(), later, true)
+            .await
+            .unwrap();
+        assert_eq!(key(&fs), original, "key must not drift on day +{d}");
+    }
+    let new_alerts = store.finding_count(tenant).await.unwrap() - findings_before;
+    // Only other rules' findings may appear; no second balance-floor row.
+    let keys = store
+        .finding_dedupe_keys(tenant, "balance-floor")
+        .await
+        .unwrap();
+    assert_eq!(keys, vec![original], "new findings: {new_alerts}");
+}
+
+#[tokio::test]
+async fn prune_rejects_retention_that_overflows_dates() {
+    let (_d, store, tenant) = store_with_tenant().await;
+    let err = store
+        .prune(tenant, now(), &cfg(14, u32::MAX))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("out of range"), "{err}");
+}
+
+#[test]
+fn retention_rejects_absurdly_large_windows() {
+    let msg = load("", &[("VEILLE_RETENTION_AGGREGATE_DAYS", "4000000000")])
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("at most"), "{msg}");
+}

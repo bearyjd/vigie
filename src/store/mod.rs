@@ -18,6 +18,8 @@ pub enum StoreError {
     Db(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error("invalid retention window: {0}")]
+    InvalidRetention(String),
     #[error("unknown tenant slug: {0}")]
     UnknownTenant(String),
 }

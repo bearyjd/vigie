@@ -174,6 +174,22 @@ impl Store {
         Ok(count)
     }
 
+    /// Dedupe keys of every stored finding of `rule_id` for the tenant.
+    pub async fn finding_dedupe_keys(
+        &self,
+        tenant: TenantId,
+        rule_id: &str,
+    ) -> Result<Vec<String>> {
+        use sqlx::Row;
+        let rows =
+            sqlx::query("SELECT dedupe_key FROM finding WHERE tenant_id = ? AND rule_id = ?")
+                .bind(tenant.0)
+                .bind(rule_id)
+                .fetch_all(self.pool())
+                .await?;
+        Ok(rows.into_iter().map(|r| r.get("dedupe_key")).collect())
+    }
+
     /// Insert findings, ignoring any whose `(tenant_id, dedupe_key)` already
     /// exists — the same condition never re-alerts. Re-detection refreshes
     /// `last_seen_at` (forward only), which keeps an ongoing condition

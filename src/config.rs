@@ -46,8 +46,12 @@ pub struct RetentionConfig {
     pub aggregate_days: u32,
 }
 
+/// Days each digest covers unless the tenant sets `digest_period_days`.
+pub const DEFAULT_DIGEST_PERIOD_DAYS: u32 = 7;
 pub const DEFAULT_RAW_RETENTION_DAYS: u32 = 14;
 pub const DEFAULT_AGGREGATE_RETENTION_DAYS: u32 = 90;
+/// Upper bound (about a century): keeps date arithmetic in range.
+const MAX_RETENTION_DAYS: u32 = 36_500;
 const ENV_RAW_DAYS: &str = "VEILLE_RETENTION_RAW_DAYS";
 const ENV_AGGREGATE_DAYS: &str = "VEILLE_RETENTION_AGGREGATE_DAYS";
 
@@ -90,6 +94,12 @@ impl RetentionConfig {
         }
         if self.aggregate_days == 0 {
             return Err("retention aggregate_days must be a positive integer".into());
+        }
+        if self.aggregate_days > MAX_RETENTION_DAYS {
+            return Err(format!(
+                "retention aggregate_days ({}) must be at most {MAX_RETENTION_DAYS}",
+                self.aggregate_days
+            ));
         }
         if self.aggregate_days < self.raw_days {
             return Err(format!(
@@ -230,7 +240,11 @@ pub struct RuleThresholds {
 }
 
 impl RuleThresholds {
-    /// Longest day-window any rule looks back over.
+    /// Longest day-window any rule looks back over, i.e. what retention must
+    /// cover. Rules with an open-ended look-back must not be added here
+    /// silently: `balance-floor` walks back to the start of a below-floor run,
+    /// but pins its episode key from the persisted finding, so it needs no
+    /// window; transaction rules read unpruned transactions.
     pub fn longest_window_days(&self) -> u32 {
         [
             self.sync_stale_days,
@@ -322,7 +336,7 @@ impl Config {
             .map(|t| {
                 t.rules
                     .longest_window_days()
-                    .max(t.digest_period_days.unwrap_or(7))
+                    .max(t.digest_period_days.unwrap_or(DEFAULT_DIGEST_PERIOD_DAYS))
             })
             .max()
             .unwrap_or(0);
