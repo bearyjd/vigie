@@ -78,7 +78,7 @@ services:
     networks: [alpha_net]
 
   alpha-db:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:19
     volumes:
       - alpha-postgres-data:/var/lib/postgresql/data
     environment:
@@ -132,7 +132,7 @@ services:
     networks: [beta_net]
 
   beta-db:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:19
     volumes:
       - beta-postgres-data:/var/lib/postgresql/data
     environment:
