@@ -521,36 +521,39 @@ impl Store {
         Ok(count as u64)
     }
 
-    /// Account snapshot observations up to `up_to`, ascending by observation
-    /// time. The bound is pushed into SQL: the table is append-only and grows
-    /// forever, so callers must not scan past their evaluation instant.
+    /// Account observations up to `up_to`, ascending by observation time.
+    /// Days already rolled up by `veille prune`
+    /// appear as one row (the day's last observation), which is exactly what
+    /// every reader reduces a day to. The bound is pushed into
+    /// SQL: the table grows between prunes, so callers must not scan past
+    /// their evaluation instant.
     pub async fn account_snapshot_rows(
         &self,
         tenant: TenantId,
         up_to: DateTime<Utc>,
     ) -> Result<Vec<AccountSnapshotRow>> {
         let up_to = up_to.to_rfc3339();
-        let rows = sqlx::query!(
-            "SELECT external_id, name, balance_minor, currency, as_of, kind \
-             FROM account_snapshot WHERE tenant_id = ? AND as_of <= ? \
-             ORDER BY as_of, external_id, id",
-            tenant.0,
-            up_to,
+        let rows = sqlx::query(
+            "SELECT external_id, name, balance_minor, currency, as_of, kind, id FROM (                SELECT external_id, name, balance_minor, currency, as_of, kind, id                FROM account_snapshot WHERE tenant_id = ?1 AND as_of <= ?2                UNION ALL                SELECT external_id, name, last_balance_minor, currency, last_as_of, kind, id                FROM account_snapshot_daily WHERE tenant_id = ?1 AND last_as_of <= ?2              ) ORDER BY as_of, external_id, id",
         )
+        .bind(tenant.0)
+        .bind(&up_to)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter()
             .map(|r| {
+                use sqlx::Row;
+                let as_of: String = r.get("as_of");
                 Ok(AccountSnapshotRow {
-                    external_id: r.external_id,
-                    name: r.name,
-                    balance_minor: r.balance_minor,
-                    currency: r.currency,
-                    as_of_date: DateTime::parse_from_rfc3339(&r.as_of)
+                    external_id: r.get("external_id"),
+                    name: r.get("name"),
+                    balance_minor: r.get("balance_minor"),
+                    currency: r.get("currency"),
+                    as_of_date: DateTime::parse_from_rfc3339(&as_of)
                         .map_err(|e| corrupt("account_snapshot.as_of", &e))?
                         .with_timezone(&Utc)
                         .date_naive(),
-                    kind: r.kind,
+                    kind: r.get("kind"),
                 })
             })
             .collect()

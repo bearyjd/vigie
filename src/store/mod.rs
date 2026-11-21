@@ -1,10 +1,12 @@
-//! Append-only snapshot store (PRP §6). SQLite, single file, WAL mode.
+//! Snapshot store (PRP §6): append-only between `veille prune` runs, which
+//! roll old rows into daily aggregates (see [`retention`]). SQLite, single file, WAL mode.
 //!
 //! Tenant isolation is enforced at this layer: every repository method takes
 //! a non-optional [`TenantId`], and every query is scoped by it. There is no
 //! way to ask the store for "all tenants' " data.
 
 pub mod repo;
+pub mod retention;
 
 use std::path::Path;
 

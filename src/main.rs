@@ -64,6 +64,17 @@ enum Command {
         #[arg(long)]
         html: bool,
     },
+    /// Roll raw snapshots older than the retention window into daily
+    /// aggregates, then delete them; expire old aggregates. Never runs
+    /// implicitly: this is the only command that deletes snapshot data.
+    Prune {
+        /// Only this tenant (default: all configured tenants)
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Prune as of this RFC 3339 instant (default: now)
+        #[arg(long)]
+        as_of: Option<String>,
+    },
     /// Run the rules over the store and print findings
     Evaluate {
         /// Only evaluate this tenant (default: all configured tenants)
@@ -122,6 +133,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             as_of,
             html,
         } => digest_command(&config, tenant, as_of, html).await,
+        Command::Prune { tenant, as_of } => prune_command(&config, tenant, as_of).await,
         Command::Run { once, tenant, full } => run_command(&config, once, tenant, full).await,
     }
 }
@@ -387,6 +399,55 @@ fn parse_as_of(as_of: Option<String>) -> Result<chrono::DateTime<chrono::Utc>, S
             .map_err(|e| format!("--as-of must be RFC 3339 (e.g. 2026-08-20T22:00:00Z): {e}")),
         None => Ok(chrono::Utc::now()),
     }
+}
+
+async fn prune_command(
+    config: &Config,
+    only_tenant: Option<String>,
+    as_of: Option<String>,
+) -> Result<(), String> {
+    let now = parse_as_of(as_of)?;
+    if !config.store_path.exists() {
+        return Err(format!(
+            "store {} does not exist — nothing to prune",
+            config.store_path.display()
+        ));
+    }
+    let store = Store::open(&config.store_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let selected: Vec<_> = config
+        .tenants
+        .iter()
+        .filter(|t| only_tenant.as_deref().is_none_or(|slug| slug == t.slug))
+        .collect();
+    if selected.is_empty() {
+        return Err(match only_tenant {
+            Some(slug) => format!("tenant {slug:?} is not in the config"),
+            None => "config contains no tenants".into(),
+        });
+    }
+    for tenant_config in selected {
+        let tenant = store
+            .tenants()
+            .by_slug(&tenant_config.slug)
+            .await
+            .map_err(|e| e.to_string())?;
+        let stats = store
+            .prune(tenant, now, &config.retention)
+            .await
+            .map_err(|e| format!("{}: {e}", tenant_config.slug))?;
+        println!(
+            "{}: pruned {} account / {} holding snapshots into daily aggregates, expired {} aggregates (raw {}d, aggregates {}d)",
+            tenant_config.slug,
+            stats.account_rows_pruned,
+            stats.holding_rows_pruned,
+            stats.aggregate_rows_expired,
+            config.retention.raw_days,
+            config.retention.aggregate_days,
+        );
+    }
+    Ok(())
 }
 
 async fn evaluate_command(
