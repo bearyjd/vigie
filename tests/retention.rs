@@ -431,3 +431,86 @@ async fn raised_floor_after_an_old_recovered_breach_alerts_as_a_new_episode() {
     assert!(keys.iter().any(|(k, _)| *k == new_key));
     assert!(!new_key.contains("2026-04"), "{new_key}"); // not the old start
 }
+
+#[tokio::test]
+async fn raised_floor_after_breach_recovered_inside_window_alerts() {
+    use veille::rules::evaluate_tenant;
+    let (_d, store, tenant) = store_with_tenant().await;
+    // Breach of 500 from day -120 to day -85 (evaluated daily), then recovered to 800.
+    for d in (85..=120).rev() {
+        store
+            .insert_account_snapshots(tenant, &[account(400)], now() - Duration::days(d))
+            .await
+            .unwrap();
+        let old = veille::config::RuleThresholds {
+            balance_floor_minor: Some(500),
+            ..Default::default()
+        };
+        evaluate_tenant(&store, tenant, old, now() - Duration::days(d), true)
+            .await
+            .unwrap();
+    }
+    for d in (0..85).rev() {
+        store
+            .insert_account_snapshots(tenant, &[account(800)], now() - Duration::days(d))
+            .await
+            .unwrap();
+    }
+    store.prune(tenant, now(), &cfg(14, 90)).await.unwrap();
+    let raised = veille::config::RuleThresholds {
+        balance_floor_minor: Some(1000),
+        ..Default::default()
+    };
+    let before = store
+        .finding_dedupe_keys(tenant, "balance-floor", now())
+        .await
+        .unwrap();
+    let f = evaluate_tenant(&store, tenant, raised, now(), true)
+        .await
+        .unwrap();
+    let k = f
+        .iter()
+        .find(|f| f.rule_id == "balance-floor")
+        .unwrap()
+        .dedupe_key
+        .clone();
+    let after = store
+        .finding_dedupe_keys(tenant, "balance-floor", now())
+        .await
+        .unwrap();
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "raised floor alert swallowed: key {k}"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_finding_row_does_not_fail_evaluation() {
+    use veille::rules::evaluate_tenant;
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("t.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let tenant = store.tenants().ensure("alpha", "Alpha").await.unwrap();
+    seed(&store, tenant, 5).await;
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO finding (tenant_id, rule_id, severity, subject, summary, evidence, \
+         detected_at, last_seen_at, dedupe_key) \
+         SELECT id, 'balance-floor', 'alert', 's', 's', '{}', 'garbage', 'garbage', \
+         'balance-floor:acct-1:2026-01-01' FROM tenant WHERE slug = 'alpha'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let thresholds = veille::config::RuleThresholds {
+        balance_floor_minor: Some(50_000),
+        ..Default::default()
+    };
+    let findings = evaluate_tenant(&store, tenant, thresholds, now(), false)
+        .await
+        .expect("evaluation survives a corrupt row");
+    assert!(findings.iter().any(|f| f.rule_id == "balance-floor"));
+}

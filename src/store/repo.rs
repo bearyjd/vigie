@@ -175,7 +175,10 @@ impl Store {
     }
 
     /// `(dedupe_key, last_seen_at)` of every stored finding of `rule_id`
-    /// detected at or before `up_to`, for the tenant.
+    /// detected at or before `up_to`, for the tenant. Rows with unparseable
+    /// timestamps are skipped with a warning. Note: `evaluate --as-of <future>`
+    /// without `--dry-run` writes future-dated findings that this filter hides
+    /// from later runs (fails safe: a duplicate alert).
     pub async fn finding_dedupe_keys(
         &self,
         tenant: TenantId,
@@ -191,18 +194,20 @@ impl Store {
         .bind(rule_id)
         .fetch_all(self.pool())
         .await?;
-        let parse = |raw: String, col: &str| {
-            DateTime::parse_from_rfc3339(&raw)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| corrupt(col, &e))
-        };
+        let parse =
+            |raw: String| DateTime::parse_from_rfc3339(&raw).map(|dt| dt.with_timezone(&Utc));
         let mut keys = Vec::new();
         for r in rows {
-            if parse(r.get("detected_at"), "finding.detected_at")? <= up_to {
-                keys.push((
-                    r.get("dedupe_key"),
-                    parse(r.get("last_seen_at"), "finding.last_seen_at")?,
-                ));
+            let key: String = r.get("dedupe_key");
+            // One corrupt row must not fail evaluation for the whole tenant.
+            let (Ok(detected), Ok(last_seen)) =
+                (parse(r.get("detected_at")), parse(r.get("last_seen_at")))
+            else {
+                tracing::warn!(rule_id, dedupe_key = %key, "skipping finding with unparseable timestamps");
+                continue;
+            };
+            if detected <= up_to {
+                keys.push((key, last_seen));
             }
         }
         Ok(keys)

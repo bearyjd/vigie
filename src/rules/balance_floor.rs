@@ -29,6 +29,9 @@ use serde_json::json;
 use super::{EvalContext, Rule};
 use crate::domain::{Finding, Severity, format_minor};
 
+/// A stored episode counts as ongoing if last seen within this many days of now.
+const SLACK_DAYS: i64 = 2;
+
 pub struct BalanceFloor;
 
 impl Rule for BalanceFloor {
@@ -69,9 +72,10 @@ impl Rule for BalanceFloor {
             // reaches the oldest point we cannot see its true start, and the
             // oldest point moves forward with every prune; fall back to the
             // episode start already recorded in the finding key so the key
-            // stays stable. Reused only if the episode was last seen at or
-            // after the oldest point; an older one ended (or went unobserved)
-            // before the window, so this run is a new episode.
+            // stays stable. Reused only if the episode was seen by the latest
+            // run; otherwise it ended (or went unobserved) and this is a new
+            // episode. Runs missed for longer than SLACK_DAYS therefore yield a
+            // new key, i.e. a duplicate alert, which fails safe.
             let run_len = series
                 .iter()
                 .rev()
@@ -82,9 +86,10 @@ impl Rule for BalanceFloor {
                 ctx.balance_floor_episodes
                     .get(account_id)
                     .filter(|(start, last_seen)| {
-                        // Proof the old episode continued into the visible
-                        // window: it was last seen there (one day of slack).
-                        *start <= observed_start && *last_seen + Duration::days(1) >= observed_start
+                        // Proof the old episode lasted until now: the latest
+                        // run saw it (UTC days, SLACK_DAYS for a missed run).
+                        *start <= observed_start
+                            && *last_seen + Duration::days(SLACK_DAYS) >= ctx.now.date_naive()
                     })
                     .map_or(observed_start, |(start, _)| *start)
             } else {
@@ -149,22 +154,21 @@ mod tests {
     }
 
     #[test]
-    fn stale_recorded_episode_is_not_reused() {
-        // Raised floor / long outage: the old episode was last seen months
-        // before the oldest visible point, so this is a new episode.
+    fn slack_boundary_is_pinned_on_both_sides() {
+        // now = 2026-08-18. Seen 2 days ago: still ongoing, key reused.
         let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
         ctx.balance_floor_episodes
-            .insert("a1".into(), (d("2026-01-01"), d("2026-01-20")));
+            .insert("a1".into(), (d("2026-01-01"), d("2026-08-16")));
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
-            "balance-floor:a1:2026-08-16"
+            "balance-floor:a1:2026-01-01"
         );
-        // One day of slack still counts as continued.
+        // Seen 3 days ago: the episode did not last until now, new key.
         ctx.balance_floor_episodes
             .insert("a1".into(), (d("2026-01-01"), d("2026-08-15")));
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
-            "balance-floor:a1:2026-01-01"
+            "balance-floor:a1:2026-08-16"
         );
     }
 
