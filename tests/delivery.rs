@@ -709,3 +709,29 @@ async fn a_push_audit_row_implies_owner_digest_rows_for_the_same_findings() {
         }
     }
 }
+
+#[tokio::test]
+async fn first_digest_look_back_is_capped_at_the_aggregate_window() {
+    let dir = TempDir::new().expect("tempdir");
+    let (store, tenant) = fresh_store(&dir).await;
+    let email = FakeEmail::default();
+    let now = eval_now();
+    let config = tenant_config(Some(weekday_name(now)));
+
+    run_tenant_once(
+        &store,
+        tenant,
+        &config,
+        &fixture_source(),
+        None,
+        Some(&email),
+        now,
+        RunOptions::default(),
+    )
+    .await
+    .expect("run");
+
+    let subject = email.sent.lock().expect("lock")[0].1.clone();
+    // Default aggregate window is 90 days: 2026-08-20 minus 90 days.
+    assert!(subject.contains("2026-05-22 to 2026-08-20"), "{subject}");
+}

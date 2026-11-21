@@ -97,3 +97,19 @@ it nightly to the backup target; history must outlive any Sure instance
   "optimize" that query; it is what makes coverage gap-free.
 - `migrations/0001_init.sql` is frozen. Schema changes are new migration
   files only.
+
+## Retention
+
+`veille prune` is the only command that deletes snapshot data; schedule it
+(e.g. daily, after `veille run --once`). It aggregates raw account/holding
+snapshots older than `raw_days` (default 14) into daily rows, deletes the raw
+rows, and expires aggregates older than `aggregate_days` (default 90), all in
+one transaction per tenant; re-running is safe. Back up the store before the
+first run. See `config/example.toml` for the knobs.
+
+Notes: only account aggregates are read back by rules and the digest (holding
+aggregates are stored for history, not read). `--as-of` cannot be in the
+future, and replaying an `--as-of` older than the retention window gives
+different results than it did at the time, because the raw rows are gone. The
+digest's catch-up look-back is capped at `aggregate_days` and says so when it
+is shortened.

@@ -174,6 +174,45 @@ impl Store {
         Ok(count)
     }
 
+    /// `(dedupe_key, last_seen_at)` of every stored finding of `rule_id`
+    /// detected and last seen at or before `up_to`, for the tenant. Rows with unparseable
+    /// timestamps are skipped with a warning. Note: `evaluate --as-of <future>`
+    /// without `--dry-run` writes future-dated findings that this filter hides
+    /// from later runs (fails safe: a duplicate alert).
+    pub async fn finding_dedupe_keys(
+        &self,
+        tenant: TenantId,
+        rule_id: &str,
+        up_to: DateTime<Utc>,
+    ) -> Result<Vec<(String, DateTime<Utc>)>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT dedupe_key, last_seen_at, detected_at FROM finding \
+             WHERE tenant_id = ? AND rule_id = ?",
+        )
+        .bind(tenant.0)
+        .bind(rule_id)
+        .fetch_all(self.pool())
+        .await?;
+        let parse =
+            |raw: String| DateTime::parse_from_rfc3339(&raw).map(|dt| dt.with_timezone(&Utc));
+        let mut keys = Vec::new();
+        for r in rows {
+            let key: String = r.get("dedupe_key");
+            // One corrupt row must not fail evaluation for the whole tenant.
+            let (Ok(detected), Ok(last_seen)) =
+                (parse(r.get("detected_at")), parse(r.get("last_seen_at")))
+            else {
+                tracing::warn!(rule_id, dedupe_key = %key, "skipping finding with unparseable timestamps");
+                continue;
+            };
+            if detected <= up_to && last_seen <= up_to {
+                keys.push((key, last_seen));
+            }
+        }
+        Ok(keys)
+    }
+
     /// Insert findings, ignoring any whose `(tenant_id, dedupe_key)` already
     /// exists — the same condition never re-alerts. Re-detection refreshes
     /// `last_seen_at` (forward only), which keeps an ongoing condition
@@ -521,36 +560,39 @@ impl Store {
         Ok(count as u64)
     }
 
-    /// Account snapshot observations up to `up_to`, ascending by observation
-    /// time. The bound is pushed into SQL: the table is append-only and grows
-    /// forever, so callers must not scan past their evaluation instant.
+    /// Account observations up to `up_to`, ascending by observation time.
+    /// Days already rolled up by `veille prune`
+    /// appear as one row (the day's last observation), which is exactly what
+    /// every reader reduces a day to. The bound is pushed into
+    /// SQL: the table grows between prunes, so callers must not scan past
+    /// their evaluation instant.
     pub async fn account_snapshot_rows(
         &self,
         tenant: TenantId,
         up_to: DateTime<Utc>,
     ) -> Result<Vec<AccountSnapshotRow>> {
         let up_to = up_to.to_rfc3339();
-        let rows = sqlx::query!(
-            "SELECT external_id, name, balance_minor, currency, as_of, kind \
-             FROM account_snapshot WHERE tenant_id = ? AND as_of <= ? \
-             ORDER BY as_of, external_id, id",
-            tenant.0,
-            up_to,
+        let rows = sqlx::query(
+            "SELECT external_id, name, balance_minor, currency, as_of, kind, id FROM (                SELECT external_id, name, balance_minor, currency, as_of, kind, id                FROM account_snapshot WHERE tenant_id = ?1 AND as_of <= ?2                UNION ALL                SELECT external_id, name, last_balance_minor, currency, last_as_of, kind, id                FROM account_snapshot_daily WHERE tenant_id = ?1 AND last_as_of <= ?2              ) ORDER BY as_of, external_id, id",
         )
+        .bind(tenant.0)
+        .bind(&up_to)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter()
             .map(|r| {
+                use sqlx::Row;
+                let as_of: String = r.get("as_of");
                 Ok(AccountSnapshotRow {
-                    external_id: r.external_id,
-                    name: r.name,
-                    balance_minor: r.balance_minor,
-                    currency: r.currency,
-                    as_of_date: DateTime::parse_from_rfc3339(&r.as_of)
+                    external_id: r.get("external_id"),
+                    name: r.get("name"),
+                    balance_minor: r.get("balance_minor"),
+                    currency: r.get("currency"),
+                    as_of_date: DateTime::parse_from_rfc3339(&as_of)
                         .map_err(|e| corrupt("account_snapshot.as_of", &e))?
                         .with_timezone(&Utc)
                         .date_naive(),
-                    kind: r.kind,
+                    kind: r.get("kind"),
                 })
             })
             .collect()

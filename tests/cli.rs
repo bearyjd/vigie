@@ -194,3 +194,78 @@ fn digest_renders_when_llm_endpoint_is_unreachable() {
         "findings still present: {stdout}"
     );
 }
+
+#[test]
+fn prune_only_runs_via_the_subcommand_and_reports_counts() {
+    use chrono::{Duration, TimeZone, Utc};
+    let dir = TempDir::new().expect("tempdir");
+    let store_path = dir.path().join("s.sqlite3");
+    let config = write_config(&dir, &store_path);
+    let now = Utc
+        .with_ymd_and_hms(2026, 8, 18, 22, 0, 0)
+        .single()
+        .expect("ts");
+    let rt = tokio::runtime::Runtime::new().expect("rt");
+    rt.block_on(async {
+        let store = veille::store::Store::open(&store_path)
+            .await
+            .expect("store");
+        let tenant = store.tenants().ensure("jd", "Self").await.expect("tenant");
+        let account = veille::domain::Account {
+            external_id: "a".into(),
+            name: "Checking".into(),
+            institution: None,
+            kind: "depository".into(),
+            status: "active".into(),
+            balance_minor: 100,
+            currency: "USD".into(),
+        };
+        for d in [40, 1] {
+            store
+                .insert_account_snapshots(
+                    tenant,
+                    std::slice::from_ref(&account),
+                    now - Duration::days(d),
+                )
+                .await
+                .expect("insert");
+        }
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_veille"))
+        .args(["prune", "--as-of", "2026-08-18T22:00:00Z", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run veille");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pruned 1 account"), "{stdout}");
+
+    // Invalid retention env fails fast, before touching the store.
+    let bad = Command::new(env!("CARGO_BIN_EXE_veille"))
+        .env("VEILLE_RETENTION_RAW_DAYS", "0")
+        .args(["prune", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run veille");
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("raw_days"));
+}
+
+#[test]
+fn prune_rejects_a_future_as_of() {
+    let dir = TempDir::new().expect("tempdir");
+    let store_path = dir.path().join("s.sqlite3");
+    let config = write_config(&dir, &store_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_veille"))
+        .args(["prune", "--as-of", "2999-01-01T00:00:00Z", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run veille");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("in the future"));
+}

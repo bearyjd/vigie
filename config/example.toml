@@ -13,6 +13,15 @@ store_path = "/var/lib/veille/veille.sqlite3"
 # [llm]
 # model = "cheap-think"
 
+# Snapshot retention, applied only by `veille prune` (defaults shown). Raw
+# per-sync snapshots older than raw_days become daily aggregates; aggregates
+# older than aggregate_days are deleted. aggregate_days must be >= raw_days and
+# >= the longest rule window. Env overrides: VEILLE_RETENTION_RAW_DAYS,
+# VEILLE_RETENTION_AGGREGATE_DAYS.
+# [retention]
+# raw_days = 14
+# aggregate_days = 90
+
 [[tenants]]
 slug = "example"
 display_name = "Example Household"

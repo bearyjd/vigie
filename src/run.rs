@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Datelike, Utc};
 
-use crate::config::TenantConfig;
+use crate::config::{DEFAULT_DIGEST_PERIOD_DAYS, RetentionConfig, TenantConfig};
 use crate::deliver::{EmailSender, PushSender, all_recipient_emails};
 use crate::digest::{DigestError, DigestInput, build_digest_input, render_html, render_text};
 use crate::rules::{EngineError, evaluate_tenant};
@@ -15,7 +15,6 @@ use crate::store::{Store, StoreError, TenantId};
 use crate::sync::{SyncError, SyncOptions, sync_tenant};
 
 const DEFAULT_DIGEST_DAY: &str = "sunday";
-const DEFAULT_DIGEST_PERIOD_DAYS: u32 = 7;
 /// At most this many detailed pushes per run; a backlog beyond it is covered
 /// by one summary push (and, always, by the digest).
 const MAX_PUSHES_PER_RUN: usize = 10;
@@ -44,6 +43,9 @@ pub trait Narrator: Send + Sync {
 pub struct RunOptions<'a> {
     pub sync: SyncOptions,
     pub narrator: Option<&'a dyn Narrator>,
+    /// Caps the digest's catch-up look-back at `aggregate_days`: snapshot
+    /// history older than that has been pruned.
+    pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Default)]
@@ -176,16 +178,26 @@ pub async fn run_tenant_once(
         let configured_days = tenant_config
             .digest_period_days
             .unwrap_or(DEFAULT_DIGEST_PERIOD_DAYS);
-        let period_days = match store.last_smtp_delivery_at(tenant).await? {
+        let wanted_days = match store.last_smtp_delivery_at(tenant).await? {
             Some(last) => {
                 let gap_days = (now.date_naive() - last.date_naive()).num_days().max(0) as u32 + 1;
                 configured_days.max(gap_days).min(FIRST_DIGEST_PERIOD_DAYS)
             }
             None => FIRST_DIGEST_PERIOD_DAYS,
         };
+        // Snapshot history is retained for aggregate_days only, so a longer
+        // catch-up could not be reported faithfully.
+        let period_days = wanted_days.min(options.retention.aggregate_days.max(configured_days));
         let mut input =
             build_digest_input(store, tenant, &tenant_config.display_name, period_days, now)
                 .await?;
+        if period_days < wanted_days {
+            input.coverage_note = Some(format!(
+                "Coverage is limited to the last {period_days} days (the snapshot retention window); \
+                 earlier snapshot history has been rolled up or removed, and findings last \
+                 seen before this window may be omitted."
+            ));
+        }
         if let Some(narrator) = options.narrator {
             input.narration = narrator.narrate(&input).await;
         }

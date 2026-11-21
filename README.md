@@ -19,8 +19,14 @@ not a setting.
   code. An (optional) LLM writes prose about findings; it can never create,
   suppress, or re-rank one.
 - **No public ingress.** A CLI invoked by a timer. It listens on nothing.
-- **History survives the upstream.** Snapshots are append-only in a single
-  SQLite file that outlives any Sure instance.
+- **History survives the upstream.** Snapshots accumulate in a single SQLite
+  file that outlives any Sure instance. Retention is explicit: nothing is ever
+  deleted except by `veille prune`, which keeps raw snapshots for 14 days,
+  rolls older ones into daily aggregates (last/min/max) kept for 90 days, and
+  then expires them. Transactions are never pruned. Tune with `[retention]`
+  (`raw_days`, `aggregate_days`) or `VEILLE_RETENTION_RAW_DAYS` /
+  `VEILLE_RETENTION_AGGREGATE_DAYS`; the aggregate window must be at least the
+  raw window and the longest rule window.
 
 See `docs/adr/` for architecture decisions and `docs/phase0/` for the
 empirical study of Sure's API surface that this design rests on.

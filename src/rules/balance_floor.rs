@@ -23,10 +23,14 @@
 //! breach stays one episode, and a recovery followed by a later re-breach is
 //! a new one (mirrors `sync-stale`'s last-success discriminator).
 
+use chrono::Duration;
 use serde_json::json;
 
 use super::{EvalContext, Rule};
 use crate::domain::{Finding, Severity, format_minor};
+
+/// A stored episode counts as ongoing if last seen within this many days of now.
+const SLACK_DAYS: i64 = 2;
 
 pub struct BalanceFloor;
 
@@ -63,13 +67,42 @@ impl Rule for BalanceFloor {
             // continuing breach stays one episode; recovery followed by a later
             // re-breach is a new one (same pattern as sync-stale's last-success
             // discriminator — v1 has no clearing path, so the key must carry it).
-            let episode_start = series
+            //
+            // The series is bounded by retention (aggregate_days). When the run
+            // reaches the oldest point we cannot see its true start, and the
+            // oldest point moves forward with every prune; fall back to the
+            // episode start already recorded in the finding key so the key
+            // stays stable. Reused only if the episode was seen by the latest
+            // run; otherwise it ended (or went unobserved) and this is a new
+            // episode. Runs missed for longer than SLACK_DAYS therefore yield a
+            // new key, i.e. a duplicate alert, which fails safe.
+            let run_len = series
                 .iter()
                 .rev()
                 .take_while(|p| p.balance_minor < floor)
-                .last()
-                .map(|p| p.date)
-                .unwrap_or(latest.date);
+                .count();
+            let observed_start = series[series.len() - run_len].date;
+            let episode_start = if run_len == series.len() {
+                ctx.balance_floor_episodes
+                    .get(account_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(start, last_seen)| {
+                        // Proof the old episode lasted until now: the latest
+                        // run saw it. Comparing UTC dates makes the effective
+                        // slack 48-72h. Newest start wins; any key whose start
+                        // is at or before the oldest visible point stays
+                        // eligible as that point moves forward, so it is
+                        // reused on every later run.
+                        *start <= observed_start
+                            && *last_seen + Duration::days(SLACK_DAYS) >= ctx.now.date_naive()
+                    })
+                    .map(|(start, _)| *start)
+                    .max()
+                    .unwrap_or(observed_start)
+            } else {
+                observed_start
+            };
             findings.push(Finding {
                 rule_id: self.id().to_string(),
                 severity: Severity::Alert,
@@ -122,6 +155,67 @@ mod tests {
         ctx.account_kinds
             .insert(account.to_string(), "depository".to_string());
         ctx
+    }
+
+    fn d(s: &str) -> chrono::NaiveDate {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn slack_boundary_is_pinned_on_both_sides() {
+        // now = 2026-08-18. Seen 2 days ago: still ongoing, key reused.
+        let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
+        ctx.balance_floor_episodes
+            .insert("a1".into(), vec![(d("2026-01-01"), d("2026-08-16"))]);
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-01-01"
+        );
+        // Seen 3 days ago: the episode did not last until now, new key.
+        ctx.balance_floor_episodes
+            .insert("a1".into(), vec![(d("2026-01-01"), d("2026-08-15"))]);
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-16"
+        );
+    }
+
+    #[test]
+    fn episode_key_is_stable_when_the_series_is_truncated() {
+        // Whole visible series is below the floor: the recorded episode start
+        // (older than the oldest visible point) wins over the moving edge.
+        let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
+        ctx.balance_floor_episodes
+            .insert("a1".into(), vec![(d("2026-05-01"), d("2026-08-17"))]);
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-05-01"
+        );
+        // A recorded start newer than the oldest point is a different run.
+        ctx.balance_floor_episodes
+            .insert("a1".into(), vec![(d("2026-08-17"), d("2026-08-17"))]);
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-16"
+        );
+    }
+
+    #[test]
+    fn recorded_episode_is_ignored_after_a_visible_recovery() {
+        let mut ctx = ctx_with_series(
+            "a1",
+            &[
+                ("2026-08-15", 30_000),
+                ("2026-08-16", 90_000),
+                ("2026-08-17", 30_000),
+            ],
+        );
+        ctx.balance_floor_episodes
+            .insert("a1".into(), vec![(d("2026-08-01"), d("2026-08-17"))]);
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-17"
+        );
     }
 
     #[test]
