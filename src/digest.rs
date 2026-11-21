@@ -47,8 +47,6 @@ pub struct DigestInput {
     pub deltas: Vec<AccountDelta>,
     /// LLM prose, if narration ran and succeeded. Never load-bearing.
     pub narration: Option<String>,
-    /// Set when the period was shortened to the retention window.
-    pub coverage_note: Option<String>,
 }
 
 /// Gather everything the digest shows for one tenant: findings detected in
@@ -153,7 +151,6 @@ pub async fn build_digest_input(
         findings,
         deltas,
         narration: None,
-        coverage_note: None,
     })
 }
 
@@ -207,7 +204,6 @@ fn template_context(input: &DigestInput) -> minijinja::Value {
         "period_start": input.period_start.to_string(),
         "period_end": input.period_end.to_string(),
         "narration_paragraphs": narration_paragraphs,
-        "coverage_note": input.coverage_note,
         "findings": findings,
         "deltas": deltas,
     }))

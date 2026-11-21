@@ -29,93 +29,7 @@ pub struct Config {
     /// from the environment variables named here, never from this file.
     #[serde(default)]
     pub smtp: Option<SmtpSection>,
-    /// Snapshot retention for `veille prune` (defaults 14 / 90 days).
-    #[serde(default)]
-    pub retention: RetentionConfig,
     pub tenants: Vec<TenantConfig>,
-}
-
-/// How long snapshot data is kept. Raw per-sync rows older than `raw_days`
-/// are rolled into daily aggregates by `veille prune`; aggregates older than
-/// `aggregate_days` are deleted. Env vars `VEILLE_RETENTION_RAW_DAYS` and
-/// `VEILLE_RETENTION_AGGREGATE_DAYS` override the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct RetentionConfig {
-    pub raw_days: u32,
-    pub aggregate_days: u32,
-}
-
-/// Days each digest covers unless the tenant sets `digest_period_days`.
-pub const DEFAULT_DIGEST_PERIOD_DAYS: u32 = 7;
-pub const DEFAULT_RAW_RETENTION_DAYS: u32 = 14;
-pub const DEFAULT_AGGREGATE_RETENTION_DAYS: u32 = 90;
-/// Upper bound (about a century): keeps date arithmetic in range.
-const MAX_RETENTION_DAYS: u32 = 36_500;
-const ENV_RAW_DAYS: &str = "VEILLE_RETENTION_RAW_DAYS";
-const ENV_AGGREGATE_DAYS: &str = "VEILLE_RETENTION_AGGREGATE_DAYS";
-
-impl Default for RetentionConfig {
-    fn default() -> Self {
-        Self {
-            raw_days: DEFAULT_RAW_RETENTION_DAYS,
-            aggregate_days: DEFAULT_AGGREGATE_RETENTION_DAYS,
-        }
-    }
-}
-
-type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
-
-/// Returns `current` unless `name` is set, in which case it must parse as a
-/// non-negative integer (zero is rejected later with the field name).
-fn env_days(env: EnvLookup<'_>, name: &str, current: u32) -> Result<u32, String> {
-    match env(name) {
-        None => Ok(current),
-        Some(v) => v
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| format!("{name}={v:?} is not a positive integer number of days")),
-    }
-}
-
-impl RetentionConfig {
-    fn with_env(self, env: EnvLookup<'_>) -> Result<Self, String> {
-        Ok(Self {
-            raw_days: env_days(env, ENV_RAW_DAYS, self.raw_days)?,
-            aggregate_days: env_days(env, ENV_AGGREGATE_DAYS, self.aggregate_days)?,
-        })
-    }
-
-    /// `longest_rule_window_days`: the longest look-back any rule (or digest)
-    /// reads; aggregates must cover it or pruning would change results.
-    fn validate(&self, longest_rule_window_days: u32) -> Result<(), String> {
-        if self.raw_days == 0 {
-            return Err("retention raw_days must be a positive integer".into());
-        }
-        if self.aggregate_days == 0 {
-            return Err("retention aggregate_days must be a positive integer".into());
-        }
-        if self.aggregate_days > MAX_RETENTION_DAYS {
-            return Err(format!(
-                "retention aggregate_days ({}) must be at most {MAX_RETENTION_DAYS}",
-                self.aggregate_days
-            ));
-        }
-        if self.aggregate_days < self.raw_days {
-            return Err(format!(
-                "retention aggregate_days ({}) must be >= raw_days ({})",
-                self.aggregate_days, self.raw_days
-            ));
-        }
-        if self.aggregate_days < longest_rule_window_days {
-            return Err(format!(
-                "retention aggregate_days ({}) is shorter than the longest rule window \
-                 ({longest_rule_window_days} days); pruning would change rule results",
-                self.aggregate_days
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,25 +153,6 @@ pub struct RuleThresholds {
     pub recurring_price_increase_pct: u32,
 }
 
-impl RuleThresholds {
-    /// Longest day-window any rule looks back over, i.e. what retention must
-    /// cover. Rules with an open-ended look-back must not be added here
-    /// silently: `balance-floor` walks back to the start of a below-floor run,
-    /// but pins its episode key from the persisted finding, so it needs no
-    /// window; transaction rules read unpruned transactions.
-    pub fn longest_window_days(&self) -> u32 {
-        [
-            self.sync_stale_days,
-            self.dormant_days,
-            self.balance_band_window_days,
-            self.duplicate_window_days,
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
-    }
-}
-
 impl Default for RuleThresholds {
     fn default() -> Self {
         Self {
@@ -287,28 +182,15 @@ pub struct UpstreamConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_env(path, &|k| std::env::var(k).ok())
-    }
-
-    /// [`Config::load`] with an injectable environment, for tests.
-    pub fn load_with_env(path: &Path, env: EnvLookup<'_>) -> Result<Self, ConfigError> {
         let display = path.display().to_string();
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: display.clone(),
             source,
         })?;
-        let mut config: Config = toml::from_str(&raw).map_err(|e| ConfigError::Invalid {
+        let config: Config = toml::from_str(&raw).map_err(|e| ConfigError::Invalid {
             path: display.clone(),
             message: e.to_string(),
         })?;
-        config.retention =
-            config
-                .retention
-                .with_env(env)
-                .map_err(|message| ConfigError::Invalid {
-                    path: display.clone(),
-                    message,
-                })?;
         config.validate(&display)?;
         Ok(config)
     }
@@ -329,18 +211,6 @@ impl Config {
         if self.tenants.is_empty() {
             return Err(invalid("at least one [[tenants]] entry is required".into()));
         }
-
-        let longest_window = self
-            .tenants
-            .iter()
-            .map(|t| {
-                t.rules
-                    .longest_window_days()
-                    .max(t.digest_period_days.unwrap_or(DEFAULT_DIGEST_PERIOD_DAYS))
-            })
-            .max()
-            .unwrap_or(0);
-        self.retention.validate(longest_window).map_err(invalid)?;
 
         let mut seen = std::collections::BTreeSet::new();
         let mut seen_base_urls = std::collections::BTreeSet::new();
