@@ -59,7 +59,8 @@ pub struct EvalContext {
     /// Latest `balance-floor` episode start already recorded per account,
     /// read back from persisted finding keys. `balance_floor` uses it so its
     /// dedupe key does not drift when pruning shortens the balance series.
-    pub balance_floor_episodes: BTreeMap<String, chrono::NaiveDate>,
+    /// Value: (episode start, date the episode was last seen).
+    pub balance_floor_episodes: BTreeMap<String, (chrono::NaiveDate, chrono::NaiveDate)>,
 }
 
 pub trait Rule: Send + Sync {
@@ -164,16 +165,22 @@ pub async fn evaluate_tenant(
 async fn balance_floor_episodes(
     store: &Store,
     tenant: TenantId,
-) -> Result<BTreeMap<String, chrono::NaiveDate>, EngineError> {
-    let mut episodes: BTreeMap<String, chrono::NaiveDate> = BTreeMap::new();
-    for key in store.finding_dedupe_keys(tenant, "balance-floor").await? {
+    now: DateTime<Utc>,
+) -> Result<BTreeMap<String, (chrono::NaiveDate, chrono::NaiveDate)>, EngineError> {
+    let mut episodes = BTreeMap::new();
+    // Only findings that existed at `now`: --as-of replays must not see later ones.
+    for (key, last_seen) in store
+        .finding_dedupe_keys(tenant, "balance-floor", now)
+        .await?
+    {
         let parsed = key
             .strip_prefix("balance-floor:")
             .and_then(|rest| rest.rsplit_once(':'))
             .and_then(|(account, date)| Some((account, date.parse::<chrono::NaiveDate>().ok()?)));
         if let Some((account, date)) = parsed {
-            let entry = episodes.entry(account.to_string()).or_insert(date);
-            *entry = (*entry).max(date);
+            let seen = last_seen.date_naive();
+            let entry = episodes.entry(account.to_string()).or_insert((date, seen));
+            *entry = (*entry).max((date, seen));
         }
     }
     Ok(episodes)
@@ -225,7 +232,7 @@ pub async fn build_context(
         account_names,
         account_currencies,
         account_kinds,
-        balance_floor_episodes: balance_floor_episodes(store, tenant).await?,
+        balance_floor_episodes: balance_floor_episodes(store, tenant, now).await?,
     })
 }
 

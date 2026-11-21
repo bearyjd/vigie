@@ -355,9 +355,10 @@ async fn balance_floor_key_is_stable_after_pruning_a_long_breach() {
     let new_alerts = store.finding_count(tenant).await.unwrap() - findings_before;
     // Only other rules' findings may appear; no second balance-floor row.
     let keys = store
-        .finding_dedupe_keys(tenant, "balance-floor")
+        .finding_dedupe_keys(tenant, "balance-floor", now() + Duration::days(10))
         .await
         .unwrap();
+    let keys: Vec<String> = keys.into_iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec![original], "new findings: {new_alerts}");
 }
 
@@ -377,4 +378,56 @@ fn retention_rejects_absurdly_large_windows() {
         .unwrap_err()
         .to_string();
     assert!(msg.contains("at most"), "{msg}");
+}
+
+#[tokio::test]
+async fn raised_floor_after_an_old_recovered_breach_alerts_as_a_new_episode() {
+    use veille::rules::evaluate_tenant;
+    let (_d, store, tenant) = store_with_tenant().await;
+    // Old breach of a 500 floor (balance 400), recovered to 800 afterwards.
+    for d in (100..=120).rev() {
+        store
+            .insert_account_snapshots(tenant, &[account(400)], now() - Duration::days(d))
+            .await
+            .unwrap();
+    }
+    let old = veille::config::RuleThresholds {
+        balance_floor_minor: Some(500),
+        ..Default::default()
+    };
+    evaluate_tenant(&store, tenant, old, now() - Duration::days(100), true)
+        .await
+        .unwrap();
+    for d in (0..100).rev() {
+        store
+            .insert_account_snapshots(tenant, &[account(800)], now() - Duration::days(d))
+            .await
+            .unwrap();
+    }
+    store.prune(tenant, now(), &cfg(14, 90)).await.unwrap();
+    // Owner raises the floor: every visible point is now below it.
+    let raised = veille::config::RuleThresholds {
+        balance_floor_minor: Some(1000),
+        ..Default::default()
+    };
+    let findings = evaluate_tenant(&store, tenant, raised, now(), true)
+        .await
+        .unwrap();
+    let new_key = findings
+        .iter()
+        .find(|f| f.rule_id == "balance-floor")
+        .expect("alert for the raised floor")
+        .dedupe_key
+        .clone();
+    let keys = store
+        .finding_dedupe_keys(tenant, "balance-floor", now())
+        .await
+        .unwrap();
+    assert_eq!(
+        keys.len(),
+        2,
+        "a new episode row, not a swallowed duplicate"
+    );
+    assert!(keys.iter().any(|(k, _)| *k == new_key));
+    assert!(!new_key.contains("2026-04"), "{new_key}"); // not the old start
 }

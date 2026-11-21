@@ -194,7 +194,8 @@ pub async fn run_tenant_once(
         if period_days < wanted_days {
             input.coverage_note = Some(format!(
                 "Coverage is limited to the last {period_days} days (the snapshot retention window); \
-                 earlier history has been rolled up or removed."
+                 earlier snapshot history has been rolled up or removed, and findings last \
+                 seen before this window may be omitted."
             ));
         }
         if let Some(narrator) = options.narrator {

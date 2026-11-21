@@ -174,20 +174,38 @@ impl Store {
         Ok(count)
     }
 
-    /// Dedupe keys of every stored finding of `rule_id` for the tenant.
+    /// `(dedupe_key, last_seen_at)` of every stored finding of `rule_id`
+    /// detected at or before `up_to`, for the tenant.
     pub async fn finding_dedupe_keys(
         &self,
         tenant: TenantId,
         rule_id: &str,
-    ) -> Result<Vec<String>> {
+        up_to: DateTime<Utc>,
+    ) -> Result<Vec<(String, DateTime<Utc>)>> {
         use sqlx::Row;
-        let rows =
-            sqlx::query("SELECT dedupe_key FROM finding WHERE tenant_id = ? AND rule_id = ?")
-                .bind(tenant.0)
-                .bind(rule_id)
-                .fetch_all(self.pool())
-                .await?;
-        Ok(rows.into_iter().map(|r| r.get("dedupe_key")).collect())
+        let rows = sqlx::query(
+            "SELECT dedupe_key, last_seen_at, detected_at FROM finding \
+             WHERE tenant_id = ? AND rule_id = ?",
+        )
+        .bind(tenant.0)
+        .bind(rule_id)
+        .fetch_all(self.pool())
+        .await?;
+        let parse = |raw: String, col: &str| {
+            DateTime::parse_from_rfc3339(&raw)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| corrupt(col, &e))
+        };
+        let mut keys = Vec::new();
+        for r in rows {
+            if parse(r.get("detected_at"), "finding.detected_at")? <= up_to {
+                keys.push((
+                    r.get("dedupe_key"),
+                    parse(r.get("last_seen_at"), "finding.last_seen_at")?,
+                ));
+            }
+        }
+        Ok(keys)
     }
 
     /// Insert findings, ignoring any whose `(tenant_id, dedupe_key)` already

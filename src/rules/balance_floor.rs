@@ -23,6 +23,7 @@
 //! breach stays one episode, and a recovery followed by a later re-breach is
 //! a new one (mirrors `sync-stale`'s last-success discriminator).
 
+use chrono::Duration;
 use serde_json::json;
 
 use super::{EvalContext, Rule};
@@ -68,8 +69,9 @@ impl Rule for BalanceFloor {
             // reaches the oldest point we cannot see its true start, and the
             // oldest point moves forward with every prune; fall back to the
             // episode start already recorded in the finding key so the key
-            // stays stable. (A recorded start newer than the oldest point
-            // belongs to a different run and is ignored.)
+            // stays stable. Reused only if the episode was last seen at or
+            // after the oldest point; an older one ended (or went unobserved)
+            // before the window, so this run is a new episode.
             let run_len = series
                 .iter()
                 .rev()
@@ -79,9 +81,12 @@ impl Rule for BalanceFloor {
             let episode_start = if run_len == series.len() {
                 ctx.balance_floor_episodes
                     .get(account_id)
-                    .copied()
-                    .filter(|recorded| *recorded <= observed_start)
-                    .unwrap_or(observed_start)
+                    .filter(|(start, last_seen)| {
+                        // Proof the old episode continued into the visible
+                        // window: it was last seen there (one day of slack).
+                        *start <= observed_start && *last_seen + Duration::days(1) >= observed_start
+                    })
+                    .map_or(observed_start, |(start, _)| *start)
             } else {
                 observed_start
             };
@@ -139,20 +144,44 @@ mod tests {
         ctx
     }
 
+    fn d(s: &str) -> chrono::NaiveDate {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn stale_recorded_episode_is_not_reused() {
+        // Raised floor / long outage: the old episode was last seen months
+        // before the oldest visible point, so this is a new episode.
+        let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
+        ctx.balance_floor_episodes
+            .insert("a1".into(), (d("2026-01-01"), d("2026-01-20")));
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-08-16"
+        );
+        // One day of slack still counts as continued.
+        ctx.balance_floor_episodes
+            .insert("a1".into(), (d("2026-01-01"), d("2026-08-15")));
+        assert_eq!(
+            BalanceFloor.evaluate(&ctx)[0].dedupe_key,
+            "balance-floor:a1:2026-01-01"
+        );
+    }
+
     #[test]
     fn episode_key_is_stable_when_the_series_is_truncated() {
         // Whole visible series is below the floor: the recorded episode start
         // (older than the oldest visible point) wins over the moving edge.
         let mut ctx = ctx_with_series("a1", &[("2026-08-16", 30_000), ("2026-08-17", 30_000)]);
         ctx.balance_floor_episodes
-            .insert("a1".into(), "2026-05-01".parse().unwrap());
+            .insert("a1".into(), (d("2026-05-01"), d("2026-08-17")));
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-05-01"
         );
         // A recorded start newer than the oldest point is a different run.
         ctx.balance_floor_episodes
-            .insert("a1".into(), "2026-08-17".parse().unwrap());
+            .insert("a1".into(), (d("2026-08-17"), d("2026-08-17")));
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-08-16"
@@ -170,7 +199,7 @@ mod tests {
             ],
         );
         ctx.balance_floor_episodes
-            .insert("a1".into(), "2026-08-01".parse().unwrap());
+            .insert("a1".into(), (d("2026-08-01"), d("2026-08-17")));
         assert_eq!(
             BalanceFloor.evaluate(&ctx)[0].dedupe_key,
             "balance-floor:a1:2026-08-17"
