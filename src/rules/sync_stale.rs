@@ -90,7 +90,6 @@ mod tests {
             account_names: Default::default(),
             account_currencies: Default::default(),
             account_kinds: Default::default(),
-            balance_floor_episodes: Default::default(),
         }
     }
 

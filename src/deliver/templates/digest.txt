@@ -1,7 +1,6 @@
 {{ tenant }} — financial watch digest
 Period: {{ period_start }} to {{ period_end }}
-{% if coverage_note %}Note: {{ coverage_note }}
-{% endif %}
+
 {% if findings -%}
 Findings ({{ findings|length }}):
 {% for f in findings %}
